@@ -11,6 +11,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
 import java.nio.DoubleBuffer;
 import java.nio.FloatBuffer;
 import java.nio.LongBuffer;
@@ -28,10 +29,12 @@ import java.util.TreeMap;
 import java.util.concurrent.Callable;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import org.tensorflow.DataType;
+import org.tensorflow.Graph;
+import org.tensorflow.Output;
 import org.tensorflow.SavedModelBundle;
 import org.tensorflow.Session;
 import org.tensorflow.Tensor;
-
 
 //import weka.core.Instances;
 //import weka.core.converters.CSVLoader;
@@ -44,6 +47,7 @@ public class Doc2Vec {
     static Logger logger = Logger.getLogger(Doc2Vec.class.getName());
     private List<Float> cum_table;
     private Map<String, List<Long>> vocab;
+    private List<String> newVocab;
     private List<String> index2word;
     private Map<String, List<Long>> docvecs;
     private List<String> offset2doctag;
@@ -70,7 +74,7 @@ public class Doc2Vec {
     private String dataPath;
 
     public Doc2Vec() {
-        this.epochs = 50;
+        this.epochs = 1;
         this.dataPath = "tag_copus.txt";
         this.save_path = "model\\variables\\variables";
         this.modelPath = "model";
@@ -214,6 +218,7 @@ public class Doc2Vec {
 
         s.runner().addTarget("copy_vocabs").addTarget("copy_d2v").addTarget("copy_nce");
     }
+    Tensor oldWordTensor;
 
     public boolean loadModel() {
         String modelFile = this.modelPath;
@@ -221,6 +226,7 @@ public class Doc2Vec {
         boolean succ = false;
         String[] tags = {"d2v_tf", "train"};
         SavedModelBundle model = SavedModelBundle.load(modelFile, tags);
+
         sess = model.session();
         try {
             List<Tensor<?>> results = sess.runner()
@@ -242,9 +248,9 @@ public class Doc2Vec {
                 cum_table.add(cumTableFloat);
             }
 
-            Tensor wordsTensor = (Tensor) it.next();
-            byte[][] wordsBytes = new byte[(int) wordsTensor.shape()[0]][];
-            wordsTensor.copyTo(wordsBytes);
+            oldWordTensor = (Tensor) it.next();
+            byte[][] wordsBytes = new byte[(int) oldWordTensor.shape()[0]][];
+            oldWordTensor.copyTo(wordsBytes);
             for (byte[] wordseByte : wordsBytes) {
                 this.index2word.add(new String(wordseByte, "UTF-8"));
             }
@@ -334,8 +340,8 @@ public class Doc2Vec {
 
         loadModel();
         trainModel(sess);
-//        if (this.save_model) {
-            saveModel(sess);
+//        if (save_model) {
+        saveModel(sess);
 //        }
 
     }
@@ -345,11 +351,9 @@ public class Doc2Vec {
         List<Long> word_indices = new ArrayList();
         word_indices.add(predict_word.get(0));
         Random ran = new Random();
-        int bound =Math.round(this.cum_table.get(this.cum_table.size()-1));
         while (word_indices.size() < negative + 1) {
             //cum_table 是一个升序序列
-//            System.out.println(Math.round(this.cum_table.get(this.cum_table.size()-1)));
-            float tmp = ran.nextInt(bound);
+            float tmp = ran.nextInt();
             int index = Collections.binarySearch(this.cum_table, tmp);
             Long w = new Long(index < 0 ? -index : index);
             if (!w.equals(predict_word.get(0))) {
@@ -438,7 +442,7 @@ public class Doc2Vec {
         scan_tags(documents);
         Map<String, Integer> vocabs = scan_vocab(documents);
         scale_vocab(vocabs, min_count, false);
-        ize_vocab("\\0");
+        finalize_vocab("\\0");
     }
 
     private void scan_tags(List<TaggedDocument> documents) {
@@ -537,7 +541,8 @@ public class Doc2Vec {
         }
         int n_newWords = new_words.size();
         logger.log(Level.INFO, "n_words_exit + n_newWords == vocabs size : {0}", n_words_exit + n_newWords == this.vocab.size());
-
+        System.out.println("com.mycompany.doc2vec.Doc2Vec.scale_vocab() " + n_newWords);
+        this.newVocab = new_words;
         this.n_newWords = n_newWords;
         ArrayList<String> retain_words = new ArrayList<>();
         retain_words.addAll(new_words);
@@ -584,7 +589,7 @@ public class Doc2Vec {
 //    drawDiagram(doc2vec, docs, label='productName', bounds_x=None, bounds_y=None)
     }
 
-    private void ize_vocab(String null_word) {
+    private void finalize_vocab(String null_word) {
         //Build tables and model weights based on  vocabulary settings.
         double power = 0.75;
         double domain = Math.pow(2, 31) - 1;
@@ -622,70 +627,62 @@ public class Doc2Vec {
         }
     }
 
-    public void saveModelTest() {
-
-    }
-
     public void saveModel(Session sess) {
+        FloatBuffer cumTable = FloatBuffer.allocate(cum_table.size());
         long[] cumTableShape = new long[]{cum_table.size()};
-        FloatBuffer cumTableBuf = FloatBuffer.allocate(cum_table.size());
-        for (int i = 0; i < cum_table.size(); ++i) {
-            cumTableBuf.put(cum_table.get(i));
+        for (float double1 : cum_table) {
+            cumTable.put(double1);
         }
-        cumTableBuf.flip();
 
-        long[] words_indexShape = new long[]{vocab.size(), 3};
-        LongBuffer words_indexBuf = LongBuffer.allocate(vocab.size() * 3);
+        LongBuffer words_index = LongBuffer.allocate(vocab.size() * 3);
+        long[] words_indexShap = new long[]{vocab.size(), 3};
         for (Map.Entry<String, List<Long>> entry : vocab.entrySet()) {
             String key = entry.getKey();
             List<Long> value = entry.getValue();
             for (Long long1 : value) {
-                words_indexBuf.put(long1);
+                words_index.put(long1);
             }
         }
-        words_indexBuf.flip();
-
-        byte[][] words = new byte[vocab.size()][];
+        //words
         int i = 0;
-        for (Map.Entry<String, List<Long>> entry : vocab.entrySet()) {
-            String key = entry.getKey();
-            List<Long> value = entry.getValue();
-            words[i] = key.getBytes(Charset.forName("UTF-8"));
-//            words_index[i] = value.stream().mapToLong((l -> l)).toArray();
+        byte[][] new_words = new byte[this.n_newWords][];
+        for (String string : this.newVocab) {
+            new_words[i] = string.getBytes(Charset.forName("UTF-8"));
             i++;
         }
-
-        long[] doctags_indexShape = new long[]{docvecs.size(), 2};
-        LongBuffer doctags_indexBuf = LongBuffer.allocate(docvecs.size() * 2);
-        for (Map.Entry<String, List<Long>> entry : docvecs.entrySet()) {
-            String key = entry.getKey();
-            List<Long> value = entry.getValue();
-            for (Long long1 : value) {
-                doctags_indexBuf.put(long1);
-            }
+        Tensor words;
+        if (this.n_newWords > 0) {
+            words = TensorflowUtil.concat(oldWordTensor, Tensor.create(new_words), 0);
+        } else {
+            words = oldWordTensor;
         }
-        doctags_indexBuf.flip();
-
         byte[][] doctags = new byte[docvecs.size()][];
+        LongBuffer doctags_index = LongBuffer.allocate(docvecs.size() * 2);
+        long[] doctags_indexShape = new long[]{docvecs.size(), 2};
         i = 0;
         for (Map.Entry<String, List<Long>> entry : docvecs.entrySet()) {
             String key = entry.getKey();
             List<Long> value = entry.getValue();
             doctags[i] = key.getBytes(Charset.forName("UTF-8"));
+            for (Long long1 : value) {
+                doctags_index.put(long1);
+            }
             i++;
         }
+        cumTable.flip();
+        doctags_index.flip();
+        words_index.flip();
 
-        sess.runner().feed("ct_plh:0", Tensor.create(cumTableShape, cumTableBuf))
-                .feed("doc_index_plh:0", Tensor.create(doctags_indexShape, doctags_indexBuf))
-                .feed("words_index_plh:0", Tensor.create(words_indexShape, words_indexBuf))
-                .feed("doctags_plh:0", Tensor.create(doctags, String.class))
-                .feed("index2w_plh:0", Tensor.create(words, String.class))
+        sess.runner().feed("ct_plh:0", Tensor.create(cumTableShape, cumTable))
+                .feed("index2w_plh:0", words)
+                .feed("words_index_plh:0", Tensor.create(words_indexShap, words_index))
+                .feed("doctags_plh:0", Tensor.create(doctags))
+                .feed("doc_index_plh:0", Tensor.create(doctags_indexShape, doctags_index))
                 .addTarget("save_dict_init").run();
-
-        sess.runner()
-                .feed("save/Const:0", Tensor.create(save_path.getBytes(Charset.forName("UTF-8"))))
+        byte[] path = this.save_path.getBytes(Charset.forName("UTF-8"));
+        
+        sess.runner().feed("save/Const:0", Tensor.create(path))
                 .addTarget("save/Identity").run();
-
     }
 
     private List<TaggedDocument> getBatchSentences(List<TaggedDocument> sentences, Integer offset) {
