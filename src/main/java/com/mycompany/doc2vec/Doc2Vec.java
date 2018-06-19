@@ -340,9 +340,9 @@ public class Doc2Vec {
 
         loadModel();
         trainModel(sess);
-//        if (save_model) {
+       if (save_model) {
         saveModel(sess);
-//        }
+       }
 
     }
 
